@@ -1,23 +1,40 @@
 <?php
 /**
  * Plugin Name: AI Spam Comment Detector
- * Description: Detects spam comments using OpenAI GPT-4 and blocks them with inline warnings via AJAX.
- * Version: 1.1
+ * Description: Detects spam comments using OpenAI GPT-4 and blocks them with inline warnings.
+ * Version: 1.0
  * Author: Rashed Hossain
  * License: GPL2
  */
 
-if ( ! defined( 'ABSPATH' ) ) exit;
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
 
-// Admin Settings
+// Start session for inline error handling.
+add_action( 'init', function () {
+	if ( ! session_id() ) {
+		session_start();
+	}
+}, 1 );
+
+// Add settings page
 add_action( 'admin_menu', function () {
-	add_options_page( 'AI Spam Detector Settings', 'AI Spam Detector', 'manage_options', 'ai-spam-detector', 'ai_spam_detector_settings_page' );
+	add_options_page(
+		'AI Spam Detector Settings',
+		'AI Spam Detector',
+		'manage_options',
+		'ai-spam-detector',
+		'ai_spam_detector_settings_page'
+	);
 } );
 
+// Register API key setting
 add_action( 'admin_init', function () {
 	register_setting( 'ai_spam_detector_options', 'ai_spam_detector_api_key' );
 } );
 
+// Settings page callback
 function ai_spam_detector_settings_page() {
 	?>
 	<div class="wrap">
@@ -39,78 +56,87 @@ function ai_spam_detector_settings_page() {
 	<?php
 }
 
-// Enqueue frontend JS
-add_action( 'wp_enqueue_scripts', function () {
-	if ( is_single() || is_page() ) {
-		wp_enqueue_script( 'ai-comment-spam-checker', plugin_dir_url( __FILE__ ) . 'js/ai-comment.js', [], null, true );
-		wp_localize_script( 'ai-comment-spam-checker', 'aiSpamAjax', [
-			'ajax_url' => admin_url( 'admin-ajax.php' ),
-			'nonce'    => wp_create_nonce( 'ai_spam_check_nonce' ),
-		] );
+// Show inline error on comment form
+add_action( 'comment_form_before', function () {
+	if ( isset( $_SESSION['ai_spam_comment_error'] ) ) {
+		echo '<p style="color:red; font-weight:bold;">' . esc_html( $_SESSION['ai_spam_comment_error'] ) . '</p>';
+		unset( $_SESSION['ai_spam_comment_error'] );
 	}
 } );
 
-// Ajax handler
-add_action( 'wp_ajax_nopriv_ai_check_spam', 'ai_ajax_check_spam' );
+// Check spam and block it silently
+add_filter( 'pre_comment_approved', function ( $approved, $commentdata ) {
+	$api_key         = get_option( 'ai_spam_detector_api_key' );
+	$comment_content = $commentdata['comment_content'] ?? '';
 
-function ai_ajax_check_spam() {
-	check_ajax_referer( 'ai_spam_check_nonce', 'nonce' );
-
-	$comment = sanitize_text_field( $_POST['comment'] ?? '' );
-	$api_key = get_option( 'ai_spam_detector_api_key' );
-
-	if ( empty( $api_key ) || empty( $comment ) ) {
-		wp_send_json_error( [ 'message' => 'Invalid input or API key.' ] );
+	if ( empty( $api_key ) || strlen( $comment_content ) < 10 ) {
+		return $approved;
 	}
 
-	$is_spam = ai_spam_detector_is_spam( $api_key, $comment );
+	$result = ai_spam_detector_is_spam( $api_key, $comment_content );
 
-	if ( is_wp_error( $is_spam ) ) {
-		wp_send_json_error( [ 'message' => $is_spam->get_error_message() ] );
+	if ( $result === true ) {
+		$_SESSION['ai_spam_comment_error'] = __( 'Your comment was detected as spam and was not submitted.', 'ai-spam-comment-detector' );
+		return 'spam';
+	} elseif ( is_wp_error( $result ) ) {
+		$_SESSION['ai_spam_comment_error'] = $result->get_error_message();
+		return 'spam';
 	}
 
-	if ( $is_spam ) {
-		wp_send_json_error( [ 'message' => 'Your comment was flagged as spam and not submitted.' ] );
-	}
+	return $approved;
+}, 10, 2 );
 
-	wp_send_json_success();
-}
-
-// GPT-4 spam check
+// Check if comment is spam using GPT-4
 function ai_spam_detector_is_spam( $api_key, $comment_text ) {
 	$endpoint = 'https://api.openai.com/v1/chat/completions';
-	$messages = [
-		[ 'role' => 'system', 'content' => 'You are a spam classifier. Respond only with "spam" or "not spam".' ],
-		[ 'role' => 'user', 'content' => "Is the following a spam comment?\n\"$comment_text\"" ],
-	];
 
-	$response = wp_remote_post( $endpoint, [
-		'headers' => [
+	$messages = array(
+		array(
+			'role'    => 'system',
+			'content' => 'You are a comment moderation assistant. Determine if a comment is spam.',
+		),
+		array(
+			'role'    => 'user',
+			'content' => "Is the following comment spam? Reply only with one word: 'spam' or 'not spam'.\n\nComment:\n\"$comment_text\"",
+		),
+	);
+
+	$args = array(
+		'headers' => array(
 			'Content-Type'  => 'application/json',
 			'Authorization' => 'Bearer ' . $api_key,
-		],
-		'body' => wp_json_encode( [
-			'model'    => 'gpt-4',
-			'messages' => $messages,
-			'max_tokens' => 3,
-			'temperature' => 0
-		] ),
-		'timeout' => 15
-	] );
+		),
+		'body'    => wp_json_encode( array(
+			'model'       => 'gpt-4',
+			'messages'    => $messages,
+			'max_tokens'  => 3,
+			'temperature' => 0,
+		) ),
+		'timeout' => 15,
+	);
+
+	$response = wp_remote_post( $endpoint, $args );
 
 	if ( is_wp_error( $response ) ) {
-		return new WP_Error( 'api_error', 'AI service unreachable.' );
+		return new WP_Error( 'api_error', __( 'AI Service is currently unreachable. Please try again later.', 'ai-spam-comment-detector' ) );
 	}
 
 	$code = wp_remote_retrieve_response_code( $response );
 	$body = json_decode( wp_remote_retrieve_body( $response ), true );
 
 	if ( isset( $body['error'] ) ) {
-		if ( $code === 401 ) return new WP_Error( 'invalid_key', 'Invalid API Key.' );
-		if ( $code === 429 ) return new WP_Error( 'quota_exceeded', 'OpenAI quota exceeded.' );
-		return new WP_Error( 'api_error', $body['error']['message'] ?? 'Unknown AI error.' );
+		$error_msg = $body['error']['message'] ?? __( 'Unknown error from AI API.', 'ai-spam-comment-detector' );
+
+		if ( $code === 401 ) {
+			return new WP_Error( 'invalid_key', __( 'Invalid API Key. Please check your key in plugin settings.', 'ai-spam-comment-detector' ) );
+		} elseif ( $code === 429 ) {
+			return new WP_Error( 'quota_exceeded', __( 'Quota exceeded. Please wait or upgrade your OpenAI plan.', 'ai-spam-comment-detector' ) );
+		} else {
+			return new WP_Error( 'api_error', sprintf( __( 'OpenAI API error: %s', 'ai-spam-comment-detector' ), esc_html( $error_msg ) ) );
+		}
 	}
 
 	$reply = strtolower( trim( $body['choices'][0]['message']['content'] ?? '' ) );
+
 	return $reply === 'spam';
 }

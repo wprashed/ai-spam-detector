@@ -52,11 +52,6 @@ Currently, this plugin uses a fixed system prompt for high accuracy. Customizati
 
 ## Changelog
 
-### 1.1
-- Integrated AJAX and Vanilla JS to provide real-time spam detection with an inline warning message.
-- Improved UI for displaying spam warnings below the comment form.
-- Updated API handling for OpenAI quota exceeded and invalid API key.
-
 ### 1.0
 - Initial release with basic spam detection using OpenAI GPT-4.
 
