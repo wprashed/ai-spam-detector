@@ -31,7 +31,13 @@ add_action( 'admin_menu', function () {
 
 // Register API key setting
 add_action( 'admin_init', function () {
-	register_setting( 'ai_spam_detector_options', 'ai_spam_detector_api_key' );
+	register_setting(
+		'ai_spam_detector_options',
+		'ai_spam_detector_api_key',
+		array(
+			'sanitize_callback' => 'sanitize_text_field',
+		)
+	);
 } );
 
 // Settings page callback
